@@ -1,0 +1,228 @@
+---
+title: "Exploration Analysis Taxi Data"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+
+raw_data_march <- read.csv("~/Documentos/others/yellow_2017-03_100K.csv", header = F)
+raw_data_june <- read.csv("~/Documentos/others/yellow_2017-06_100K.csv", header = F)
+raw_data_november <- read.csv("~/Documentos/others/yellow_2017-11_100K.csv", header = F)
+
+colnames_all <- c("VendorID","tpep_pickup_datetime","tpep_dropoff_datetime","passenger_count","trip_distance","RatecodeID","store_and_fwd_flag","PULocationID","DOLocationID","payment_type","fare_amount","extra","mta_tax","tip_amount","tolls_amount","improvement_surcharge","total_amount")
+
+colnames(raw_data_march) <- colnames_all
+colnames(raw_data_june) <- colnames_all
+colnames(raw_data_november) <- colnames_all
+
+raw_data <- rbind(raw_data_march, raw_data_june, raw_data_november)
+```
+In this document, we have subsampled data by taking 100K registers from each month in order to speed up computations in the exploratory analysis. The full dataset will be used in the learning part.
+
+## Preprocessing: coercing features
+
+Begin with the preprocessing step. Firstly, we coerce categorical features to be factor-like, and time-based features to datetime ones.
+
+```{r data}
+# coerce categorical features
+categ_features <- c("VendorID", "RatecodeID", "PULocationID", "DOLocationID", "payment_type")
+raw_data[categ_features] <- lapply(raw_data[categ_features], as.factor)
+sapply(raw_data, class)
+
+  raw_data$tpep_pickup_datetime <- as.POSIXct(as.character(raw_data$tpep_pickup_datetime), format = "%Y-%m-%d %H:%M:%S", tz = "EST")
+  raw_data$tpep_dropoff_datetime <- as.POSIXct(as.character(raw_data$tpep_dropoff_datetime), format = "%Y-%m-%d %H:%M:%S", tz = "EST")
+```
+## Brief summary of data
+
+We get the first sight of our data, the most basic statistical measurements are displayed: min-max values, median, mean for numerical values; and number of values for each category in factor features.
+
+```{r summary}
+summary(raw_data)
+```
+In this first sight, we can notice that the dataset is prone to the presence of outliers. For instance, there exist trips with 0 passengers, which means taxi is empty. In next steps, we should check if this kind of rides are free-charge (the natural scenario), or on the contrary, the amount features reflects some income. Other negative values in features (e.g.: fare_amount, extra) seems suspicious as well.
+
+## Univariate analysis
+
+# Number of passengers
+
+Let's check first passenger_count:
+
+```{r, echo=FALSE}
+ggplot(data=raw_data, aes(passenger_count)) + geom_histogram(binwidth = 0.1)
+```
+Most of yellow taxi rides consist of a single passenger, which is normal in business (and stressful) cities like the great New York :D
+Additionally, we have also checked that no floating point values are present in this tipically integer feature.
+
+Although zero-passenger rides looks like negligible, lets zoom in in this part to check the real value:
+
+```{r , echo=FALSE}
+ggplot(data=raw_data %>% filter(passenger_count < 1.0), aes(passenger_count)) + geom_histogram(binwidth = 0.1)
+```
+Bingo! It seems that "ghostly" rides in NY are more common than expected. However, 600 rides from 300,000 represents a small fraction (0.002) in the sampled set. If this proportion maintains in the general set, maybe it is safe to set the passenger_count in these rides as NaN or remove them directly. It depends on the prediction algorithm used to detect patterns in data. In our case, we will rely on Gradient Boosted Trees (concretely, XGBoost) which elegantly deals with NaN values. Please, refer to the original paper to get further knowledge about this aspect.
+
+
+# Trip distance
+
+Let's move now to trip distance:
+
+```{r, echo=FALSE}
+ggplot(data=raw_data, aes(trip_distance)) + geom_histogram(binwidth = 1.0)
+```
+The plot above shows that, in general, rides are short; most of them below 5 miles. Low prices may indicate too high prices for yellow cabs or main users are people in a hurry for nearly due meetings.
+
+Let's check percentiles in this feature:
+
+```{r , echo=FALSE}
+
+p = c(.01,.03,.05,.1,.15,.20,.50,.70,.80,.90,.95)
+distance_quantiles = data.frame(q = quantile(raw_data[,"trip_distance"], probs = p),
+                 prob = p)
+ggplot(aes(x = prob, y = q), data = distance_quantiles) + geom_line()
+```
+```{r}
+distance_quantiles
+```
+
+80% of trips are below 4 miles, and 50% are below 1.60 miles. This, and the fact that the approximate longitude of Manhattan is 12.6 milles, might confirm our previous hypothesis. 
+
+# Time-based features
+
+Now we move to check time-based features, which usually are the most conflictive in data preprocessing. 
+First, we are gonna visualize if there are some big gaps in dropin and dropoff features. To do that we create two new variables that indicates the day of year in which ocurrs each ride (both dropoff and pickup actions).
+```{r}
+raw_data <- raw_data %>% mutate(dayOfYearDO = as.numeric(strftime(tpep_dropoff_datetime, format = "%j")), dayOfYearPU = as.numeric(strftime(tpep_pickup_datetime, format = "%j")))
+ggplot(data=raw_data, aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
+ggplot(data=raw_data, aes(dayOfYearPU)) + geom_histogram(binwidth = 1.0)
+```
+There is a considerable downtrend in dropoff (DO) timestamps in the middle of March, which matches with the correspondent day for pickup (PU) timestamps. This fact may be explained by strikes, or some relevant events in the city. However, there is a weird gap in November for DO which does not match with the same period in PU timestamp data.
+
+Let's zoom in the data from November and March:
+ 
+```{r}
+ggplot(data=raw_data %>% filter(dayOfYearDO > 300), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
+ggplot(data=raw_data %>% filter(dayOfYearDO < 100), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
+```
+It was a false alarm. The large gap in DO was due to the granularity esblished in the previous histogram plot.
+However, it is rare the lack of data in the upper and lower limits in all months studied. 
+
+# Trip duration
+Let's create a new variable from timestamps which indicates the trip duration in rides. This numeric features will be much more interesting for our algorithm than raw datetimes.
+
+
+```{r}
+raw_data <- raw_data %>% mutate(trip_duration = as.numeric(difftime(tpep_dropoff_datetime, tpep_pickup_datetime, units = "secs")))
+ggplot(data=raw_data, aes(trip_duration)) + geom_histogram(binwidth = 60.0)
+```
+It seems that there are some unrealist trips with too long rides. Let's observe if they represent a real nuance.
+
+```{r}
+p = c(.01,.03,.05,.1,.15,.20,.50,.70,.80,.90,.95)
+duration_quantiles = data.frame(q = quantile(raw_data[,"trip_duration"], probs = p),
+                 prob = p)
+ggplot(aes(x = prob, y = q), data = duration_quantiles) + geom_line()
+```
+```{r}
+duration_quantiles
+```
+95% of values are below the natural threshold of 3600 s (1h). Actually, 50% of rides are below the 30-min limit.
+
+It seems to me 2 hours in a taxi ride is too much, specially if the taxi cab smells bad, so it is a good limit to detect outliers. Instant trips seems unrealistic to me as well. So let's count how many outliers in this new feature:
+
+```{r}
+raw_data %>%  filter(trip_duration > 3600 * 2 | trip_duration <= 0) %>% count()
+
+```
+The proportion of eternal and lightspeed rides is under one percent, so we can move forward and saying it is safe to obviate these rows. We will set them to NaN in the modeling section.
+
+Now let's draw these outliers in a temporal line to see if they come from the same period. 
+```{r}
+ggplot(data=raw_data %>%  filter(trip_duration > 3600 * 2), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
+ggplot(data=raw_data %>%  filter(trip_duration <= 0), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
+
+```
+They seem well distributed among the temporal line. There are only a couple of days with no outliers though.
+a single day with no
+```{r}
+raw_data %>% filter(trip_duration > 3600 * 2) %>% group_by(dayOfYearDO) %>%
+  count() %>% arrange(desc(n))
+raw_data %>% filter(trip_duration <= 0) %>% group_by(dayOfYearDO) %>%
+  count() %>% arrange(desc(n))
+```
+Day 309 and 310 seems noisy as they introduce most of outliers in our data, so maybe it is safe to remove them before applying any learning process.
+
+Finally, we are gonna inspect the shape of the output variable: tip_amount.
+```{r}
+
+ggplot(data=raw_data, aes(tip_amount)) + geom_histogram(binwidth = 0.5)
+ggplot(data=raw_data %>% filter(tip_amount < 5), aes(tip_amount)) + geom_histogram(binwidth = 0.5)
+raw_data %>% filter(tip_amount < 0) %>% count()
+```
+This important variables seems well-defined and with almost no outlier values, so lucky us! 
+
+## Bivariate analysis
+
+Let's check how strong/weak is the relationship among each input feature and our output objective (tip_amount)
+# Matrix of correlation
+
+```{r}
+numeric.columns <-c("trip_duration", "passenger_count","trip_distance","fare_amount","extra","mta_tax","tip_amount","tolls_amount","improvement_surcharge","total_amount", "dayOfYearDO", "dayOfYearPU")
+data.numeric <- raw_data[, which(names(raw_data) %in% numeric.columns)]
+
+sapply(data.numeric, class)
+
+M <- cor(data.numeric) # get correlations
+M.spear <- cor(data.numeric, method ="spearman")
+library('corrplot') #package corrplot
+corrplot(M, method = "circle") #plot matrix
+corrplot(M.spear, method = "circle") #plot matrix
+
+```
+According to the graph above, tip_amount is correlated with total_amount and fare_amount, as well as trip_distance and trip_duration (our newly created feature) which at the same time is related to fare_amount.
+
+It seems not to be a relationship among time and monetary-based features, at least in a daily basis. However, by adding more time-based features (such as, weekOfYear, dayOfWeek, hour, etc.) we may detect new correlations.
+
+# Time-tips
+Let's check in depth relation with time, and then, with the most relevant features:
+```{r , echo=FALSE}
+stats_by_day <- raw_data %>% group_by(dayOfYearDO) %>% summarise(sum=sum(tip_amount))
+
+ggplot(data=stats_by_day, aes(x=dayOfYearDO, y=sum)) + geom_line()
+
+stats_by_day <- raw_data %>% group_by(dayOfYearPU) %>% summarise(sum=sum(tip_amount))
+ggplot(data=stats_by_day, aes(x=dayOfYearPU, y=sum)) + geom_line()
+```
+```{r}
+subset <- raw_data %>% mutate(monthDO = as.numeric(strftime(tpep_dropoff_datetime, format = "%m")), monthPU = as.numeric(strftime(tpep_pickup_datetime, format = "%m")))
+subset %>% group_by(monthDO) %>% summarise(mean=mean(tip_amount))
+```
+In the graph above, it seems tips grow in recent months despite a really bad period in November. The same analysis can be performed in hourly basis.
+
+
+We can move now to analyze any trend among tip_amount and the most correlated features discovered before. 
+
+```{r , echo=FALSE}
+ggplot(data=raw_data, aes(x=tip_amount, y=trip_distance)) + geom_point() + stat_smooth(method="lm", se=FALSE)
+
+# we remove outliers
+ggplot(data=raw_data %>% filter(trip_distance < 30 & tip_amount < 30), aes(x=tip_amount, y=trip_distance)) + geom_point() + stat_smooth(method="lm", se=FALSE)
+```
+By removing outliers, we can observe a linear relationship among trip_distance and tip_amount, which means that normally long distances imply longer benefits. However, I expect a stronger relationship with trip_duration as in yellow cabs, fares are usually computed according to duration not distance.
+
+In the same graph, we can notice other outliers like zero-distance trips.
+
+```{r , echo=FALSE}
+
+# with outliers
+ggplot(data=raw_data, aes(x=tip_amount, y=trip_duration)) + geom_point() + stat_smooth(method="lm", se=FALSE)
+
+# we remove outliers (trip duration longer than 3 hours)
+ggplot(data=raw_data %>% filter(trip_duration < 10800 & tip_amount < 50 & trip_duration > 0) , aes(x=tip_amount, y=trip_duration)) + geom_point() + stat_smooth(method="lm", se=FALSE)
+
+colnames(raw_data)
+```
+Again, the relationship is linear trending and similar in strength to trip_distance.
+
+With this plot we can conclude the exploratory analysis 

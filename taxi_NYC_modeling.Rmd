@@ -1,0 +1,237 @@
+---
+title: "Modeling yellow-cab taxi data from NYC"
+author: "Sergio Ramirez"
+date: "August 30, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(dplyr)
+```
+
+In this document, we focus applying the insights obtained from the previous analytic document by transforming data in a better shape, and creating a simple predicting model for this dataset.
+
+In order to accomplish this task, we will rely in three datasets: 
+
+- Training set: consists of monthly data from March, June and November.
+- Validation set: made of trips ocurred during the first 2 weeks of December.
+- Test set: made of trips from the last 2 weeks of December.
+
+## Data load and preparation
+
+```{r load}
+
+
+raw_data_march <- read.csv("~/Documentos/others/yellow_2017-03_100K.csv", header = F)
+raw_data_june <- read.csv("~/Documentos/others/yellow_2017-06_100K.csv", header = F)
+raw_data_november <- read.csv("~/Documentos/others/yellow_2017-11_100K.csv", header = F)
+#raw_data_half_december <- read.csv("~/Documentos/others/yellow_tripdata_2017-12-half2-100K.csv", header = F)
+
+colnames_all <- c("VendorID","tpep_pickup_datetime","tpep_dropoff_datetime","passenger_count","trip_distance","RatecodeID","store_and_fwd_flag","PULocationID","DOLocationID","payment_type","fare_amount","extra","mta_tax","tip_amount","tolls_amount","improvement_surcharge","total_amount")
+raw_train <- rbind(raw_data_march, raw_data_june, raw_data_november)
+colnames(raw_train) <- colnames_all
+
+rm(raw_data_march)
+rm(raw_data_june)
+rm(raw_data_november)
+rm(raw_data_half_december)
+```
+
+
+## Re-format features
+
+First we transform datetime columns into POSIXct features in order to compute trip_duration variables (difference between PO and PU datetimes). We also coerce categorical variables to factor type.
+
+This process is replicated on validation/test data.
+
+```{r format}
+
+parse_datetime <- function(data) {
+  data$tpep_pickup_datetime <- as.POSIXct(as.character(data$tpep_pickup_datetime), format = "%Y-%m-%d %H:%M:%S", tz = "EST")
+  data$tpep_dropoff_datetime <- as.POSIXct(as.character(data$tpep_dropoff_datetime), format = "%Y-%m-%d %H:%M:%S", tz = "EST")
+  data
+}
+
+raw_train <- parse_datetime(raw_train)
+summary(raw_train)
+
+```
+
+Now, we will do some creative stuff with feature engineering. We create one variable that describes the duration of trips, and two others that store the day of year that pickup and dropoff events happen for each trip. Other time-based features have been included to detect further seasonality patterns in data. For instance, people are happier during weekends so they will likely give higher tips those days. 
+
+Day of month is not included because there is no seasonality there as duration of months is not constant. To avoid duplication of synthetic features, all of them have been created using only dropoff time since we understand there is no significant difference among them (except for hour).
+
+```{r feat-engineering}
+featura_engineering <- function(data) {
+  data %>% mutate(
+    trip_duration = as.numeric(difftime(tpep_dropoff_datetime, tpep_pickup_datetime, units = "secs")),
+    hourDO = as.numeric(strftime(tpep_dropoff_datetime, format = "%H")),
+    hourPU = as.numeric(strftime(tpep_pickup_datetime, format = "%H")),
+    weekday = as.numeric(strftime(tpep_dropoff_datetime, format = "%w")),
+    timestamp = as.numeric(tpep_dropoff_datetime)
+  )
+} 
+
+
+# Coerce types to include time-based features in encoding.
+categ_features <- c("hourDO", "hourPU", "weekday", "PULocationID", "DOLocationID", "VendorID", "RatecodeID", "payment_type", "store_and_fwd_flag")
+coerce_types <- function(data) {
+  data[categ_features] <- lapply(data[categ_features], as.factor)
+  # Remove datetime features from data  
+  data[,-which(names(data) %in% c("tpep_dropoff_datetime", "tpep_pickup_datetime"))]
+}
+
+raw_train <- featura_engineering(raw_train)
+raw_train <- coerce_types(raw_train)
+
+summary(raw_train)
+
+
+```
+Outliers were analyzed and identified in the previous document but here we grab some extra information from location-based features. We noticed that some drop-off locations were never used as pick-up locations, somekind of weird fact.
+
+Beyond that, we filter out those registers we believe can be cleary outlined as outliers. For example, negative distances and durations, ghostly trips (no passengers on board), etc. Feature values for outliers may be set to NaN as our algorithms is able to deal with these values, but I think it's faster to just remove them.
+
+Number of outliers discovered in this first analysis are below 1% of data, so it's safely to filter them out. By addressing outlier values in most intuitive features, we have been able to remove at the same time not-as-clear outliers in other variables, such as: mta_tax, or extra.
+
+```{r outliers}
+
+summary(raw_train) 
+
+# How many distinct locations
+raw_train %>% distinct(PULocationID) %>% count()
+raw_train %>% distinct(DOLocationID) %>% count()
+
+# it seems there is some drop-off locations are not present in the pickup set, somekind of weird
+distinctPU <- raw_train %>% distinct(PULocationID)
+distinctDO <- raw_train %>% distinct(DOLocationID)
+
+# how many outliers we have, not missing data
+outliers <- raw_train %>% filter(passenger_count <= 0 | passenger_count >= 10 | trip_distance <= 0 & trip_distance > 1000 | fare_amount <= 0 | fare_amount > 1000 | total_amount <= 0 | total_amount > 1000 | tip_amount < 0 | trip_duration <= 0 | trip_duration > 10800)
+
+# less than 1% of data are outliers, we can force them to NaN, or even safely remove them 
+nrow(outliers) / nrow(raw_train)
+
+# cleaned data
+clean_data_from_outliers <- function(data) {
+  data %>% filter(!(passenger_count <= 0 | passenger_count >= 10 | trip_distance <= 0 & trip_distance > 1000 | fare_amount <= 0 | fare_amount > 1000 | total_amount <= 0 | total_amount > 1000 | tip_amount < 0 | tip_amount > total_amount | trip_duration <= 0 | trip_duration > 10800))
+}
+
+raw_train <- clean_data_from_outliers(raw_train)
+
+raw_train %>% count()
+summary(raw_train)
+
+# as we can see by removing these noisy examples, we have removed suspicious values in features with less knowledges, such as: extra, other taxes, etc.
+```
+
+Finally, categorical features should be one-hot-encoded to avoid our model finds out false relationships among numerical values; the only ones accepted by XGBoost. Here we found a problem with the number of binary variables generated as there are more than 2 hundreds different locations. In order to deal with memory performance nuances we use a schema based on sparse features.
+
+```{r OHE}
+
+# one-hot-encoding categorical features
+library(Matrix)
+encode_data <- function(dataset) {
+  sparse.model.matrix(timestamp + passenger_count + trip_distance + fare_amount + extra + mta_tax +  tolls_amount + improvement_surcharge + total_amount~.-1, data=dataset)
+
+}
+
+raw_train <- raw_train %>% arrange(timestamp)
+split.position <- nrow(raw_train) * 0.8
+
+raw_train <- encode_data(raw_train)
+backup.train <- raw_train
+
+y_train <- raw_train[1:split.position,"tip_amount"]
+y_test <- raw_train[split.position:nrow(raw_train),"tip_amount"]
+raw_test <- raw_train[split.position:nrow(raw_train),-which(raw_train@Dimnames[[2]] %in% c("tip_amount"))]
+raw_train <- raw_train[1:split.position,-which(raw_train@Dimnames[[2]] %in% c("tip_amount"))]
+
+
+
+saveRDS(raw_train, file="/home/sramirez/taxi_ohe_train_X.Rda")
+saveRDS(y_train, file="/home/sramirez/taxi_ohe_train_y.Rda")
+saveRDS(raw_test, file="/home/sramirez/test_ohe_X.Rda")
+saveRDS(y_test, file="/home/sramirez/test_ohe_y.Rda")
+
+nrow(raw_train)
+nrow(raw_test)
+length(y_train)
+length(y_test)
+#summary(raw_train)
+
+```
+
+## Learning phase
+
+Now, we perform training with data from the 3 months specified in the document. Our first idea was to use a validation set to select the best configuration for the most important parameter in XGBoost: the number of rounds. However, because of the huge amount of data I'd rather focus on a simple 80/20 hold-out validation process. Before performing split, we sort the 3-months dataset  by timestamp. By doing so, the validation process will be less biased as we include time information in input features (hour, timestamp, etc.). 
+
+A better validation process could be performed by relying on a big data platform such as Spark. Nevertheless, this process demands longer time than a rapid validation with a reduce subset of the original dataset.
+
+About the classification algorithm chosen, we have relied on XGBoost because of its competitive time performance, and its great predictive capabilities. Authors of the algorithm proved that it was possible to train model with millions of data in a single machine. So we think it is the perfect fit for our purposes.
+
+```{r training, echo=FALSE}
+
+raw_train <- readRDS(file="/home/sramirez/taxi_ohe_train_X.Rda")
+y_train <- readRDS(file="/home/sramirez/taxi_ohe_train_y.Rda")
+raw_test <- readRDS(file="/home/sramirez/test_ohe_X.Rda")
+y_test <- readRDS(file="/home/sramirez/test_ohe_y.Rda")
+
+
+dtrain <- xgb.DMatrix(raw_train, label = y_train)
+dvalid <- xgb.DMatrix(raw_test, label = y_test)
+
+watchlist <- c(train = dtrain, valid = dvalid)
+xgb.model <- xgb.train(data = dtrain,
+ eta = 0.3,
+ max_depth = 6,
+ subsample = 0.8,
+ colsample_bytree = 0.8,
+ seed = 1,
+ eval_metric = "rmse",
+ nthread = 6,
+ nrounds = 100,
+ watchlist = watchlist
+)
+
+xgb.save(xgb.model, "last_xgbmodel_taxiNYC")
+
+
+```
+Validate predictions
+```{r prediction}
+# Reload model and test
+xgb.model <- xgb.load("last_xgbmodel_taxiNYC")
+X_test <- readRDS(file="/home/sramirez/test_ohe_X.Rda")
+y_test <- readRDS(file="/home/sramirez/test_ohe_y.Rda")
+
+# predict values in test set
+y_test_pred <- predict(xgb.model, X_test)
+err_test <- RMSE(y_test_pred, y_test)
+residual.vector <- abs(y_test_pred - y_test)
+naive.residual.vector <- abs(mean(y_train) - y_test)
+paste("RMSE for test =", err_test)
+paste("Absolute mean error for test =", mean(residual.vector))
+paste("Standard deviation error for test =", sd(residual.vector))
+paste("RMSE for naive test =", RMSE(mean(y_train), y_test))
+paste("Absolute mean error for naive test =", mean(naive.residual.vector))
+paste("Standard deviation error for naive test =", sd(naive.residual.vector))
+
+summary(y_test)
+```
+According to the results, our first model is able to make predictions with a mean error around 50 cents. This allow us to make better predictions than the naïve model (that based on mean value in train data), which is a great start! Although the model can be improved with other synthethic features, such as aggregations by locations, number of passengers, etc. Also by using extra months in previous years we can include more features focused on stationality, such as dayOfYear, month, etc.
+
+Finally, we will check what features are considered as relevant for our model:
+```{r}
+importance_matrix <- xgb.importance(model = xgb.model)
+
+raw_train@Dimnames[[2]]
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+```
