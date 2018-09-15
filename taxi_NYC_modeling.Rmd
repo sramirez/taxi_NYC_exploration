@@ -15,22 +15,18 @@ library(caret)
 library(dplyr)
 ```
 
-In this document, we focus applying the insights obtained from the previous analytic document by transforming data in a better shape, and creating a simple predicting model for this dataset.
+In this document, we focus on applying the insights obtained from the previous analytic document by transforming data in a better shape, and creating a simple predicting model from that cleaned dataset.
 
-In order to accomplish this task, we will rely in three datasets: 
-
-- Training set: consists of monthly data from March, June and November.
-- Validation set: made of trips ocurred during the first 2 weeks of December.
-- Test set: made of trips from the last 2 weeks of December.
+In this case, we take a subsample of 1 millions rows from each monthly dataset in order to speed up computations this preliminary analysis. In next steps, we can further investigate the datase using a big data platform, such as Spark.
 
 ## Data load and preparation
 
 ```{r load}
 
 
-raw_data_march <- read.csv("~/Documentos/others/yellow_2017-03_100K.csv", header = F)
-raw_data_june <- read.csv("~/Documentos/others/yellow_2017-06_100K.csv", header = F)
-raw_data_november <- read.csv("~/Documentos/others/yellow_2017-11_100K.csv", header = F)
+raw_data_march <- read.csv("~/Documentos/others/yellow_2017-03_1M.csv", header = F)
+raw_data_june <- read.csv("~/Documentos/others/yellow_2017-06_1M.csv", header = F)
+raw_data_november <- read.csv("~/Documentos/others/yellow_2017-11_1M.csv", header = F)
 #raw_data_half_december <- read.csv("~/Documentos/others/yellow_tripdata_2017-12-half2-100K.csv", header = F)
 
 colnames_all <- c("VendorID","tpep_pickup_datetime","tpep_dropoff_datetime","passenger_count","trip_distance","RatecodeID","store_and_fwd_flag","PULocationID","DOLocationID","payment_type","fare_amount","extra","mta_tax","tip_amount","tolls_amount","improvement_surcharge","total_amount")
@@ -200,14 +196,12 @@ xgb.model <- xgb.train(data = dtrain,
  watchlist = watchlist
 )
 
-xgb.save(xgb.model, "last_xgbmodel_taxiNYC")
-
-
+xgb.save(xgb.model, "/home/sramirez/git/taxi_NYC_exploration/last_xgbmodel_taxiNYC")
 ```
 Validate predictions
 ```{r prediction}
 # Reload model and test
-xgb.model <- xgb.load("last_xgbmodel_taxiNYC")
+xgb.model <- xgb.load("/home/sramirez/git/taxi_NYC_exploration/last_xgbmodel_taxiNYC")
 X_test <- readRDS(file="/home/sramirez/test_ohe_X.Rda")
 y_test <- readRDS(file="/home/sramirez/test_ohe_y.Rda")
 
@@ -227,11 +221,14 @@ summary(y_test)
 ```
 According to the results, our first model is able to make predictions with a mean error around 50 cents. This allow us to make better predictions than the naïve model (that based on mean value in train data), which is a great start! Although the model can be improved with other synthethic features, such as aggregations by locations, number of passengers, etc. Also by using extra months in previous years we can include more features focused on stationality, such as dayOfYear, month, etc.
 
-Finally, we will check what features are considered as relevant for our model:
+Finally, we will check what features are considered more relevant for our model:
 ```{r}
 importance_matrix <- xgb.importance(model = xgb.model)
 
-raw_train@Dimnames[[2]]
 print(importance_matrix)
+
 xgb.plot.importance(importance_matrix = importance_matrix)
+
+raw_train@Dimnames[[2]][as.numeric(importance_matrix$Feature[0:10])]
 ```
+
