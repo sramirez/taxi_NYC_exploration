@@ -15,19 +15,16 @@ library(caret)
 library(dplyr)
 ```
 
-In this document, we focus on applying the insights obtained from the previous analytic document by transforming data in a better shape, and creating a simple predicting model from that cleaned dataset.
+In this document, we focus on applying the insights obtained from the previous analytic document by transforming data in a better shape, and creating a simple predictive model from that cleaned data.
 
-In this case, we take a subsample of 1 millions rows from each monthly dataset in order to speed up computations this preliminary analysis. In next steps, we can further investigate the datase using a big data platform, such as Spark.
+In this case, we take a subsample of 1 millions rows from each monthly dataset in order to speed up computations in this preliminary analysis. As future work, data can be furtherly investigated using a proper set of big data platforms, such as Spark.
 
 ## Data load and preparation
 
 ```{r load}
-
-
 raw_data_march <- read.csv("~/Documentos/others/yellow_2017-03_1M.csv", header = F)
 raw_data_june <- read.csv("~/Documentos/others/yellow_2017-06_1M.csv", header = F)
 raw_data_november <- read.csv("~/Documentos/others/yellow_2017-11_1M.csv", header = F)
-#raw_data_half_december <- read.csv("~/Documentos/others/yellow_tripdata_2017-12-half2-100K.csv", header = F)
 
 colnames_all <- c("VendorID","tpep_pickup_datetime","tpep_dropoff_datetime","passenger_count","trip_distance","RatecodeID","store_and_fwd_flag","PULocationID","DOLocationID","payment_type","fare_amount","extra","mta_tax","tip_amount","tolls_amount","improvement_surcharge","total_amount")
 raw_train <- rbind(raw_data_march, raw_data_june, raw_data_november)
@@ -36,15 +33,12 @@ colnames(raw_train) <- colnames_all
 rm(raw_data_march)
 rm(raw_data_june)
 rm(raw_data_november)
-rm(raw_data_half_december)
 ```
 
 
 ## Re-format features
 
-First we transform datetime columns into POSIXct features in order to compute trip_duration variables (difference between PO and PU datetimes). We also coerce categorical variables to factor type.
-
-This process is replicated on validation/test data.
+First we transform datetime columns into POSIXct features in order to compute trip duration variable (time difference between DropOff (DO) and PickUp (PU) datetimes). We also coerce categorical variables to factor type.
 
 ```{r format}
 
@@ -59,9 +53,9 @@ summary(raw_train)
 
 ```
 
-Now, we will do some creative stuff with feature engineering. We create one variable that describes the duration of trips, and two others that store the day of year that pickup and dropoff events happen for each trip. Other time-based features have been included to detect further seasonality patterns in data. For instance, people are happier during weekends so they will likely give higher tips those days. 
+Now, we will do some creative stuff with feature engineering. We create one variable that describes the duration of trips, and others to model stational patterns in pickup and dropoff events. For instance, we believe people are happier during weekends so they will likely give higher tips those days. 
 
-Day of month is not included because there is no seasonality there as duration of months is not constant. To avoid duplication of synthetic features, all of them have been created using only dropoff time since we understand there is no significant difference among them (except for hour).
+Day of month is not included because we think monthly seasonality is extremely scarce (https://robjhyndman.com/hyndsight/monthly-seasonality/). Also we have not added variables related to year seasonality as our data do not extende beyond a single year unit. Finally, absolute datetime variable (timestamp) has also been incorporated to the model.
 
 ```{r feat-engineering}
 featura_engineering <- function(data) {
@@ -90,15 +84,11 @@ summary(raw_train)
 
 
 ```
-Outliers were analyzed and identified in the previous document but here we grab some extra information from location-based features. We noticed that some drop-off locations were never used as pick-up locations, somekind of weird fact.
+Outliers were analyzed and identified in the previous document but here we grab some extra information from location-based features. We noticed that some drop-off locations were never used as pick-up locations, somekind of weird.
 
-Beyond that, we filter out those registers we believe can be cleary outlined as outliers. For example, negative distances and durations, ghostly trips (no passengers on board), etc. Feature values for outliers may be set to NaN as our algorithms is able to deal with these values, but I think it's faster to just remove them.
-
-Number of outliers discovered in this first analysis are below 1% of data, so it's safely to filter them out. By addressing outlier values in most intuitive features, we have been able to remove at the same time not-as-clear outliers in other variables, such as: mta_tax, or extra.
+Beyond that, we filter out those registers we believe can be cleary stated as outliers. For example, negative distances and durations, ghostly trips (no passengers on board), etc. Feature values for outliers may be set to NaN as our algorithms is able to deal with these values, but we believe it is much faster to just remove them.
 
 ```{r outliers}
-
-summary(raw_train) 
 
 # How many distinct locations
 raw_train %>% distinct(PULocationID) %>% count()
@@ -126,8 +116,10 @@ summary(raw_train)
 
 # as we can see by removing these noisy examples, we have removed suspicious values in features with less knowledges, such as: extra, other taxes, etc.
 ```
+Number of outliers discovered in this first analysis are below 1% of data, so it's safely to filter them out. By addressing outlier values in most intuitive features, we have been able to remove at the same time not-as-clear outliers in other variables, such as: mta_tax, or extra.
 
-Finally, categorical features should be one-hot-encoded to avoid our model finds out false relationships among numerical values; the only ones accepted by XGBoost. Here we found a problem with the number of binary variables generated as there are more than 2 hundreds different locations. In order to deal with memory performance nuances we use a schema based on sparse features.
+
+Finally, categorical features should be one-hot-encoded to avoid our model finds out false relationships among numerical values; the only ones accepted by XGBoost. Here we found a problem with the number of binary variables generated as there are more than 2 hundreds different locations. In order to deal with memory performance nuances we have relied on a schema based on sparse features to overcome these problems.
 
 ```{r OHE}
 
@@ -166,11 +158,11 @@ length(y_test)
 
 ## Learning phase
 
-Now, we perform training with data from the 3 months specified in the document. Our first idea was to use a validation set to select the best configuration for the most important parameter in XGBoost: the number of rounds. However, because of the huge amount of data I'd rather focus on a simple 80/20 hold-out validation process. Before performing split, we sort the 3-months dataset  by timestamp. By doing so, the validation process will be less biased as we include time information in input features (hour, timestamp, etc.). 
+Now, we learn from data from the three months specified in the requirements. Our first idea was to use a validation set to select the best configuration for the most important parameter in XGBoost: the number of rounds. However, because of the huge amount of data and the rapidness of this analysis we would rather focus on a simple 80/20 hold-out validation process. Before performing split, we sort the 3-months dataset by timestamp. By doing so, we guarantee the validation process will be less biased as we are including time information in some input features (hour, timestamp, etc.). 
 
 A better validation process could be performed by relying on a big data platform such as Spark. Nevertheless, this process demands longer time than a rapid validation with a reduce subset of the original dataset.
 
-About the classification algorithm chosen, we have relied on XGBoost because of its competitive time performance, and its great predictive capabilities. Authors of the algorithm proved that it was possible to train model with millions of data in a single machine. So we think it is the perfect fit for our purposes.
+About the classification algorithm chosen, we have relied on XGBoost because of its competitive time performance, and its great predictive capabilities. Authors of the algorithm proved that it was possible to train model with millions of data in a single machine. So we think it is the perfect fit for our purposes. Parameter values were set by default as specified in the documentation. We have only tweaked subsample and colsample_bytree to put more emphasis on avoiding overfitting.
 
 ```{r training, echo=FALSE}
 
@@ -219,7 +211,7 @@ paste("Standard deviation error for naive test =", sd(naive.residual.vector))
 
 summary(y_test)
 ```
-According to the results, our first model is able to make predictions with a mean error around 50 cents. This allow us to make better predictions than the naïve model (that based on mean value in train data), which is a great start! Although the model can be improved with other synthethic features, such as aggregations by locations, number of passengers, etc. Also by using extra months in previous years we can include more features focused on stationality, such as dayOfYear, month, etc.
+According to the results, our first model is able to make predictions with a mean error around 50 cents. This allow us to assert that we are able to make better predictions than the naïve model (that based on mean value in train data), which is a great start! Although the model can be improved with feature engineering, for instance, by adding aggregations by locations, number of passengers, etc. Furthermore, by using extra months from previous years we can include more features focused on stationality, such as dayOfYear, month, etc.
 
 Finally, we will check what features are considered more relevant for our model:
 ```{r}
