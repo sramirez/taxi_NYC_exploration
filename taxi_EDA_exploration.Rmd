@@ -1,5 +1,6 @@
 ---
 title: "Exploration Analysis Taxi Data"
+author: Sergio Ramírez
 output: pdf_document
 ---
 
@@ -20,11 +21,13 @@ colnames(raw_data_november) <- colnames_all
 
 raw_data <- rbind(raw_data_march, raw_data_june, raw_data_november)
 ```
-In this document, we have subsampled data by taking 100K registers from each month in order to speed up computations in the exploratory analysis. The full dataset will be used in the learning part.
+In this document, we have subsampled data by taking 100K registers from each month in order to speed up computations in the exploratory analysis. A greater amount of data will be used in the modeling document.
+
+A deeper exploration could have been performed with a proper cluster of machines, and some big data tools. But because of the need for a quick exploration we have relied on R and a subsampled of the original data.
 
 ## Preprocessing: coercing features
 
-Begin with the preprocessing step. Firstly, we coerce categorical features to be factor-like, and time-based features to datetime ones.
+We start with the preprocessing step. Firstly, we coerce categorical features to be factor time, and time-based features to POSIX variables.
 
 ```{r data}
 # coerce categorical features
@@ -37,31 +40,30 @@ sapply(raw_data, class)
 ```
 ## Brief summary of data
 
-We get the first sight of our data, the most basic statistical measurements are displayed: min-max values, median, mean for numerical values; and number of values for each category in factor features.
+We move to get the first sight of our data. In this part, the most relevant and basic statistical measurements are displayed: min-max values, median, mean for numerical values; and number of values for each category in factor features.
 
 ```{r summary}
 summary(raw_data)
 ```
-In this first sight, we can notice that the dataset is prone to the presence of outliers. For instance, there exist trips with 0 passengers, which means taxi is empty. In next steps, we should check if this kind of rides are free-charge (the natural scenario), or on the contrary, the amount features reflects some income. Other negative values in features (e.g.: fare_amount, extra) seems suspicious as well.
+In this first sight, we can notice how the dataset is prone to the presence of outliers. For instance, there exist trips with 0 passengers, which is weird. In next steps, we should check if this kind of rides are free-charge (the natural scenario) due to some promotions, or on the contrary, the amount features reflects some income. Other negative values in features (e.g.: fare_amount, extra) seems suspicious to me as well.
 
 ## Univariate analysis
 
 # Number of passengers
 
-Let's check first passenger_count:
+Let's check first passenger_count variable:
 
 ```{r, echo=FALSE}
 ggplot(data=raw_data, aes(passenger_count)) + geom_histogram(binwidth = 0.1)
 ```
-Most of yellow taxi rides consist of a single passenger, which is normal in business (and stressful) cities like the great New York :D
-Additionally, we have also checked that no floating point values are present in this tipically integer feature.
+Most of yellow taxi rides consist of a single passenger, which is normal in business (and stressful) cities like the great New York. Additionally, we have also checked that no floating point values are present in this tipically integer feature.
 
-Although zero-passenger rides looks like negligible, lets zoom in in this part to check the real value:
+Although zero-passenger rides looks like negligible, lets zoom in at this part to check the real value:
 
 ```{r , echo=FALSE}
 ggplot(data=raw_data %>% filter(passenger_count < 1.0), aes(passenger_count)) + geom_histogram(binwidth = 0.1)
 ```
-Bingo! It seems that "ghostly" rides in NY are more common than expected. However, 600 rides from 300,000 represents a small fraction (0.002) in the sampled set. If this proportion maintains in the general set, maybe it is safe to set the passenger_count in these rides as NaN or remove them directly. It depends on the prediction algorithm used to detect patterns in data. In our case, we will rely on Gradient Boosted Trees (concretely, XGBoost) which elegantly deals with NaN values. Please, refer to the original paper to get further knowledge about this aspect.
+Bingo! It seems that "ghostly" rides in NY are more common than expected. However, 600 rides from 300,000 represents a small fraction (0.002) in the sampled set. If this proportion maintains in the general set, maybe it is safe to set the passenger_count in these rides as NaN or remove the entire registers directly. It depends on the prediction algorithm used to detect patterns in data. In our case, we will rely on Gradient Boosted Trees (concretely, XGBoost) which elegantly deals with NaN values. Please, refer to the original paper to get further knowledge about this aspect.
 
 
 # Trip distance
@@ -71,14 +73,14 @@ Let's move now to trip distance:
 ```{r, echo=FALSE}
 ggplot(data=raw_data, aes(trip_distance)) + geom_histogram(binwidth = 1.0)
 ```
-The plot above shows that, in general, rides are short; most of them below 5 miles. Low prices may indicate too high prices for yellow cabs or main users are people in a hurry for nearly due meetings.
+The plot above shows that, in general, rides are short; most of them below 5 miles. Small distances in rides may indicate too high prices for long rides in yellow cabs, or main users are people in a hurry for nearly due meetings.
 
 Let's check percentiles in this feature:
 
 ```{r , echo=FALSE}
 
-p = c(.01,.03,.05,.1,.15,.20,.50,.70,.80,.90,.95)
-distance_quantiles = data.frame(q = quantile(raw_data[,"trip_distance"], probs = p),
+p <- c(.01,.03,.05,.1,.15,.20,.50,.70,.80,.90,.95)
+distance_quantiles <- data.frame(q = quantile(raw_data[,"trip_distance"], probs = p),
                  prob = p)
 ggplot(aes(x = prob, y = q), data = distance_quantiles) + geom_line()
 ```
@@ -86,18 +88,18 @@ ggplot(aes(x = prob, y = q), data = distance_quantiles) + geom_line()
 distance_quantiles
 ```
 
-80% of trips are below 4 miles, and 50% are below 1.60 miles. This, and the fact that the approximate longitude of Manhattan is 12.6 milles, might confirm our previous hypothesis. 
+80% of trips are below 4 miles, and 50% are below 1.60 miles. This, and the fact that the approximate longitude of Manhattan is 12.6 milles (https://www.google.com/maps), might confirm our previous hypothesis. 
 
 # Time-based features
 
-Now we move to check time-based features, which usually are the most conflictive in data preprocessing. 
-First, we are gonna visualize if there are some big gaps in dropin and dropoff features. To do that we create two new variables that indicates the day of year in which ocurrs each ride (both dropoff and pickup actions).
+Now let's move on time-based features, which usually are the most conflictive in data preprocessing, but at the same time extremely relevant.
+First, we visualize if there are some big gaps in pick-up (PU) and dropoff (DO) features. To do that we create two new variables that indicates the day of year in which ocurrs each ride (both dropoff and pickup actions).
 ```{r}
 raw_data <- raw_data %>% mutate(dayOfYearDO = as.numeric(strftime(tpep_dropoff_datetime, format = "%j")), dayOfYearPU = as.numeric(strftime(tpep_pickup_datetime, format = "%j")))
 ggplot(data=raw_data, aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
 ggplot(data=raw_data, aes(dayOfYearPU)) + geom_histogram(binwidth = 1.0)
 ```
-There is a considerable downtrend in dropoff (DO) timestamps in the middle of March, which matches with the correspondent day for pickup (PU) timestamps. This fact may be explained by strikes, or some relevant events in the city. However, there is a weird gap in November for DO which does not match with the same period in PU timestamp data.
+There is a considerable downtrend in DO timestamps in the middle of March, which matches with the correspondent day for PU timestamps. This fact may be explained by strikes, or some relevant events in the city. However, there is a weird gap in November for DO which does not match with the same period in PU timestamp data.
 
 Let's zoom in the data from November and March:
  
@@ -105,12 +107,11 @@ Let's zoom in the data from November and March:
 ggplot(data=raw_data %>% filter(dayOfYearDO > 300), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
 ggplot(data=raw_data %>% filter(dayOfYearDO < 100), aes(dayOfYearDO)) + geom_histogram(binwidth = 1.0)
 ```
-It was a false alarm. The large gap in DO was due to the granularity esblished in the previous histogram plot.
-However, it is rare the lack of data in the upper and lower limits in all months studied. 
+It was a false alarm. The large gap in DO was due to the granularity set in the previous histogram.
+However, it is important to remark the lack of data in the upper and lower limits for all months studied. 
 
 # Trip duration
 Let's create a new variable from timestamps which indicates the trip duration in rides. This numeric features will be much more interesting for our algorithm than raw datetimes.
-
 
 ```{r}
 raw_data <- raw_data %>% mutate(trip_duration = as.numeric(difftime(tpep_dropoff_datetime, tpep_pickup_datetime, units = "secs")))
@@ -129,13 +130,13 @@ duration_quantiles
 ```
 95% of values are below the natural threshold of 3600 s (1h). Actually, 50% of rides are below the 30-min limit.
 
-It seems to me 2 hours in a taxi ride is too much, specially if the taxi cab smells bad, so it is a good limit to detect outliers. Instant trips seems unrealistic to me as well. So let's count how many outliers in this new feature:
+It seems to me 2 hours in a taxi ride is too much, specially if the cabs smell bad, so it would be nice to detect and remove outliers. Instant trips seems unrealistic to me as well. So let's count how many outliers are present in this new feature:
 
 ```{r}
 raw_data %>%  filter(trip_duration > 3600 * 2 | trip_duration <= 0) %>% count()
 
 ```
-The proportion of eternal and lightspeed rides is under one percent, so we can move forward and saying it is safe to obviate these rows. We will set them to NaN in the modeling section.
+The proportion of eternal and light-speed rides are under one percent, so we can move forward and saying it is safe to obviate these rows. We will set them to NaN in the modeling section.
 
 Now let's draw these outliers in a temporal line to see if they come from the same period. 
 ```{r}
@@ -144,7 +145,6 @@ ggplot(data=raw_data %>%  filter(trip_duration <= 0), aes(dayOfYearDO)) + geom_h
 
 ```
 They seem well distributed among the temporal line. There are only a couple of days with no outliers though.
-a single day with no
 ```{r}
 raw_data %>% filter(trip_duration > 3600 * 2) %>% group_by(dayOfYearDO) %>%
   count() %>% arrange(desc(n))
@@ -153,18 +153,18 @@ raw_data %>% filter(trip_duration <= 0) %>% group_by(dayOfYearDO) %>%
 ```
 Day 309 and 310 seems noisy as they introduce most of outliers in our data, so maybe it is safe to remove them before applying any learning process.
 
-Finally, we are gonna inspect the shape of the output variable: tip_amount.
+Finally, we want to inspect the shape of the output variable in order to detect determinant nuances for our task: tip_amount.
 ```{r}
 
 ggplot(data=raw_data, aes(tip_amount)) + geom_histogram(binwidth = 0.5)
 ggplot(data=raw_data %>% filter(tip_amount < 5), aes(tip_amount)) + geom_histogram(binwidth = 0.5)
 raw_data %>% filter(tip_amount < 0) %>% count()
 ```
-This important variables seems well-defined and with almost no outlier values, so lucky us! 
+This varible seems well-defined and with almost no outlier values, so lucky us! 
 
 ## Bivariate analysis
 
-Let's check how strong/weak is the relationship among each input feature and our output objective (tip_amount)
+Let's check how strong/weak is the relationship among some input features, and our output objective (tip_amount)
 # Matrix of correlation
 
 ```{r}
@@ -182,10 +182,10 @@ corrplot(M.spear, method = "circle") #plot matrix
 ```
 According to the graph above, tip_amount is correlated with total_amount and fare_amount, as well as trip_distance and trip_duration (our newly created feature) which at the same time is related to fare_amount.
 
-It seems not to be a relationship among time and monetary-based features, at least in a daily basis. However, by adding more time-based features (such as, weekOfYear, dayOfWeek, hour, etc.) we may detect new correlations.
+It seems not to be very relevant the relationship among time and monetary-based features, at least in a daily basis. However, by adding more time-based features (such as, weekOfYear, dayOfWeek, hour, etc.) we might detect new correlations.
 
 # Time-tips
-Let's check in depth relation with time, and then, with the most relevant features:
+Let's check in depth relation with time:
 ```{r , echo=FALSE}
 stats_by_day <- raw_data %>% group_by(dayOfYearDO) %>% summarise(sum=sum(tip_amount))
 
@@ -223,6 +223,4 @@ ggplot(data=raw_data %>% filter(trip_duration < 10800 & tip_amount < 50 & trip_d
 
 colnames(raw_data)
 ```
-Again, the relationship is linear trending and similar in strength to trip_distance.
-
-With this plot we can conclude the exploratory analysis 
+Again, the relationship is linear trending and similar in strength to trip_distance. With this plot we can conclude the exploratory analysis.
